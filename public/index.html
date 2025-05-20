@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resumable File Upload</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        .upload-container {
+            border: 2px dashed #ccc;
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            margin-bottom: 20px;
+            background-color: #f9f9f9;
+            transition: all 0.3s;
+        }
+        .upload-container.drag-over {
+            border-color: #007bff;
+            background-color: rgba(0, 123, 255, 0.1);
+        }
+        .file-list {
+            margin-top: 20px;
+        }
+        .file-item {
+            border: 1px solid #eee;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .file-info {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .progress-container {
+            width: 100%;
+            background-color: #f0f0f0;
+            border-radius: 5px;
+            overflow: hidden;
+        }
+        .progress-bar {
+            height: 20px;
+            background-color: #4CAF50;
+            text-align: center;
+            line-height: 20px;
+            color: white;
+            transition: width 0.3s;
+        }
+        .file-actions {
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 8px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .upload-btn {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .pause-btn {
+            background-color: #FFC107;
+            color: black;
+        }
+        .resume-btn {
+            background-color: #2196F3;
+            color: white;
+        }
+        .cancel-btn {
+            background-color: #f44336;
+            color: white;
+        }
+        .hidden {
+            display: none;
+        }
+        .upload-stats {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>Resumable File Upload</h1>
+    
+    <div class="upload-container" id="dropArea">
+        <h2>Drag & Drop Files Here</h2>
+        <p>or</p>
+        <input type="file" id="fileInput" multiple />
+    </div>
+    
+    <div class="file-list" id="fileList"></div>
+
+    <script>
+        // Configuration for chunk upload
+        const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks
+        const MAX_RETRY_ATTEMPTS = 3;
+        const RETRY_DELAY = 1000; // 1 second
+
+        // Store file upload states
+        const uploadStates = new Map();
+
+        // Main class to handle resumable uploads
+        class ResumableUpload {
+            constructor(file) {
+                this.file = file;
+                this.chunkSize = CHUNK_SIZE;
+                this.totalChunks = Math.ceil(file.size / this.chunkSize);
+                this.currentChunk = 0;
+                this.uploadedChunks = new Set();
+                this.uploading = false;
+                this.paused = false;
+                this.completed = false;
+                this.failed = false;
+                this.retryAttempts = 0;
+                this.uploadId = this.generateUploadId();
+                this.createTime = Date.now();
+                this.startTime = null;
+                this.bytesUploaded = 0;
+                this.uploadSpeed = 0;
+                this.timeRemaining = 0;
+                this.lastUpdateTime = 0;
+                this.lastBytesUploaded = 0;
+                
+                // Check if this file was previously uploaded (localStorage)
+                this.loadState();
+            }
+
+            generateUploadId() {
+                return `${this.file.name.replace(/\s/g, '_')}_${this.file.size}_${this.file.lastModified}`;
+            }
+
+            saveState() {
+                const state = {
+                    fileName: this.file.name,
+                    fileSize: this.file.size,
+                    fileType: this.file.type,
+                    lastModified: this.file.lastModified,
+                    uploadedChunks: Array.from(this.uploadedChunks),
+                    createTime: this.createTime,
+                    uploadId: this.uploadId,
+                    totalChunks: this.totalChunks,
+                    bytesUploaded: this.bytesUploaded
+                };
+                
+                try {
+                    localStorage.setItem(`upload_${this.uploadId}`, JSON.stringify(state));
+                } catch (error) {
+                    console.error('Failed to save upload state:', error);
+                }
+            }
+
+            loadState() {
+                try {
+                    const savedState = localStorage.getItem(`upload_${this.uploadId}`);
+                    if (savedState) {
+                        const state = JSON.parse(savedState);
+                        this.uploadedChunks = new Set(state.uploadedChunks);
+                        this.bytesUploaded = state.bytesUploaded;
+                        this.currentChunk = Math.max(...this.uploadedChunks, -1) + 1;
+                        
+                        if (this.currentChunk >= this.totalChunks) {
+                            this.completed = true;
+                        }
+                        
+                        return true;
+                    }
+                } catch (error) {
+                    console.error('Failed to load upload state:', error);
+                }
+                return false;
+            }
+
+            clearState() {
+                localStorage.removeItem(`upload_${this.uploadId}`);
+            }
+
+            start() {
+                if (this.completed) {
+                    this.onComplete();
+                    return;
+                }
+                
+                this.uploading = true;
+                this.paused = false;
+                this.failed = false;
+                
+                if (!this.startTime) {
+                    this.startTime = Date.now();
+                }
+                
+                this.uploadNextChunk();
+            }
+
+            pause() {
+                this.paused = true;
+                this.uploading = false;
+            }
+
+            resume() {
+                if (this.completed) return;
+                this.start();
+            }
+
+            cancel() {
+                this.uploading = false;
+                this.paused = false;
+                this.clearState();
+                this.onCancel();
+            }
+
+            async uploadNextChunk() {
+                if (!this.uploading || this.paused || this.completed || this.failed) {
+                    return;
+                }
+
+                // If we've uploaded all chunks
+                if (this.currentChunk >= this.totalChunks) {
+                    this.completed = true;
+                    this.uploading = false;
+                    this.saveState();
+                    this.onComplete();
+                    return;
+                }
+
+                // Skip chunks that are already uploaded
+                while (this.uploadedChunks.has(this.currentChunk) && this.currentChunk < this.totalChunks) {
+                    this.currentChunk++;
+                }
+
+                if (this.currentChunk >= this.totalChunks) {
+                    this.completed = true;
+                    this.uploading = false;
+                    this.saveState();
+                    this.onComplete();
+                    return;
+                }
+
+                try {
+                    // Prepare the chunk
+                    const start = this.currentChunk * this.chunkSize;
+                    const end = Math.min(start + this.chunkSize, this.file.size);
+                    const chunk = this.file.slice(start, end);
+                    
+                    // Update UI with progress before starting upload
+                    this.updateProgress();
+                    
+                    // Simulate upload with a delay based on file size to simulate network
+                    // In a real implementation, this would be an actual fetch request
+                    await this.simulateChunkUpload(chunk, this.currentChunk);
+                    
+                    // Mark this chunk as uploaded
+                    this.uploadedChunks.add(this.currentChunk);
+                    this.bytesUploaded += (end - start);
+                    this.saveState();
+                    
+                    // Move to the next chunk
+                    this.currentChunk++;
+                    
+                    // Update progress and stats
+                    this.updateProgress();
+                    this.updateStats();
+                    
+                    // Continue with the next chunk
+                    setTimeout(() => this.uploadNextChunk(), 0);
+                } catch (error) {
+                    console.error(`Error uploading chunk ${this.currentChunk}:`, error);
+                    this.handleUploadError();
+                }
+            }
+            
+		async simulateChunkUpload(chunk, chunkIndex) {
+			try {
+				// Create form data to send to the server
+				const formData = new FormData();
+				formData.append('file', chunk);
+				formData.append('fileName', this.file.name);
+				formData.append('totalChunks', this.totalChunks);
+				
+				// Send the chunk to the server with query parameters
+				const response = await fetch(`/api/upload-chunk?uploadId=${encodeURIComponent(this.uploadId)}&chunkIndex=${encodeURIComponent(chunkIndex)}`, {
+					method: 'POST',
+					body: formData,
+					headers: {
+						// No need to set Content-Type as it's automatically set by FormData
+					}
+				});
+				
+				if (!response.ok) {
+					const errorData = await response.json();
+					throw new Error(errorData.message || 'Server error');
+				}
+				
+				const data = await response.json();
+				return data;
+			} catch (error) {
+				console.error(`Error uploading chunk ${chunkIndex}:`, error);
+				throw error;
+			}
+		}
+
+            handleUploadError() {
+                this.retryAttempts++;
+                
+                if (this.retryAttempts <= MAX_RETRY_ATTEMPTS) {
+                    console.log(`Retrying chunk ${this.currentChunk}, attempt ${this.retryAttempts}`);
+                    // Wait a bit before retrying
+                    setTimeout(() => {
+                        if (this.uploading && !this.paused) {
+                            this.uploadNextChunk();
+                        }
+                    }, RETRY_DELAY * this.retryAttempts);
+                } else {
+                    this.failed = true;
+                    this.uploading = false;
+                    this.onError(new Error(`Failed to upload chunk ${this.currentChunk} after ${MAX_RETRY_ATTEMPTS} attempts`));
+                    this.retryAttempts = 0;
+                }
+            }
+
+            updateProgress() {
+                const progress = (this.uploadedChunks.size / this.totalChunks) * 100;
+                this.onProgress(progress);
+            }
+            
+            updateStats() {
+                const now = Date.now();
+                const elapsedSinceLastUpdate = (now - this.lastUpdateTime) / 1000;
+                
+                if (elapsedSinceLastUpdate > 1) { // Update stats every second
+                    // Calculate upload speed (bytes per second)
+                    const bytesInInterval = this.bytesUploaded - this.lastBytesUploaded;
+                    this.uploadSpeed = bytesInInterval / elapsedSinceLastUpdate;
+                    
+                    // Calculate estimated time remaining
+                    const remainingBytes = this.file.size - this.bytesUploaded;
+                    this.timeRemaining = this.uploadSpeed > 0 ? remainingBytes / this.uploadSpeed : 0;
+                    
+                    // Update timestamps and bytes for next calculation
+                    this.lastUpdateTime = now;
+                    this.lastBytesUploaded = this.bytesUploaded;
+                    
+                    // Call the stats callback
+                    this.onStats({
+                        uploadSpeed: this.uploadSpeed,
+                        timeRemaining: this.timeRemaining,
+                        bytesUploaded: this.bytesUploaded,
+                        totalBytes: this.file.size
+                    });
+                }
+            }
+
+            // Event handlers (to be overridden by UI)
+            onProgress(percent) {}
+            onComplete() {}
+            onCancel() {}
+            onError(error) {}
+            onStats(stats) {}
+        }
+
+        // UI handling
+        document.addEventListener('DOMContentLoaded', () => {
+            const dropArea = document.getElementById('dropArea');
+            const fileInput = document.getElementById('fileInput');
+            const fileList = document.getElementById('fileList');
+
+            // Setup drag and drop events
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                dropArea.addEventListener(eventName, preventDefaults, false);
+            });
+
+            function preventDefaults(e) {
+                e.preventDefault();
+                e.stopPropagation();
+            }
+
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropArea.addEventListener(eventName, highlight, false);
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropArea.addEventListener(eventName, unhighlight, false);
+            });
+
+            function highlight() {
+                dropArea.classList.add('drag-over');
+            }
+
+            function unhighlight() {
+                dropArea.classList.remove('drag-over');
+            }
+
+            // Handle file drop
+            dropArea.addEventListener('drop', handleDrop, false);
+            fileInput.addEventListener('change', handleFileSelect, false);
+
+            function handleDrop(e) {
+                const dt = e.dataTransfer;
+                const files = dt.files;
+                handleFiles(files);
+            }
+
+            function handleFileSelect() {
+                const files = fileInput.files;
+                handleFiles(files);
+            }
+
+            function handleFiles(files) {
+                if (files.length === 0) return;
+                
+                [...files].forEach(file => {
+                    // Don't add duplicate files
+                    if (uploadStates.has(file.name)) return;
+                    
+                    // Create file upload element
+                    const fileElement = createFileElement(file);
+                    fileList.appendChild(fileElement);
+                    
+                    // Initialize upload
+                    initializeUpload(file, fileElement);
+                });
+            }
+
+            function createFileElement(file) {
+                const fileElement = document.createElement('div');
+                fileElement.className = 'file-item';
+                fileElement.id = `file-${file.name.replace(/\s/g, '_')}`;
+                
+                // Format the file size
+                const fileSize = formatFileSize(file.size);
+                
+                fileElement.innerHTML = `
+                    <div class="file-info">
+                        <div>
+                            <strong>${file.name}</strong>
+                            <span>(${fileSize})</span>
+                        </div>
+                        <div class="file-actions">
+                            <button class="upload-btn">Upload</button>
+                            <button class="pause-btn">Pause</button>
+                            <button class="resume-btn hidden">Resume</button>
+                            <button class="cancel-btn">Cancel</button>
+                        </div>
+                    </div>
+                    <div class="progress-container">
+                        <div class="progress-bar" style="width: 0%">0%</div>
+                    </div>
+                    <div class="upload-stats">
+                        Ready to upload
+                    </div>
+                `;
+                
+                return fileElement;
+            }
+
+            function initializeUpload(file, fileElement) {
+                const uploadBtn = fileElement.querySelector('.upload-btn');
+                const pauseBtn = fileElement.querySelector('.pause-btn');
+                const resumeBtn = fileElement.querySelector('.resume-btn');
+                const cancelBtn = fileElement.querySelector('.cancel-btn');
+                const progressBar = fileElement.querySelector('.progress-bar');
+                const uploadStats = fileElement.querySelector('.upload-stats');
+                
+                // Initially hide the pause button
+                pauseBtn.classList.add('hidden');
+                
+                // Create a new upload instance
+                const upload = new ResumableUpload(file);
+                
+                // Store upload state
+                uploadStates.set(file.name, upload);
+                
+                // Event handlers
+                upload.onProgress = (percent) => {
+                    progressBar.style.width = `${percent}%`;
+                    progressBar.textContent = `${percent.toFixed(1)}%`;
+                };
+                
+                upload.onComplete = () => {
+                    progressBar.style.width = '100%';
+                    progressBar.textContent = '100%';
+                    progressBar.style.backgroundColor = '#4CAF50';
+                    uploadStats.textContent = 'Upload completed';
+                    uploadBtn.classList.add('hidden');
+                    pauseBtn.classList.add('hidden');
+                    resumeBtn.classList.add('hidden');
+                };
+                
+                upload.onCancel = () => {
+                    fileList.removeChild(fileElement);
+                    uploadStates.delete(file.name);
+                };
+                
+                upload.onError = (error) => {
+                    progressBar.style.backgroundColor = '#f44336';
+                    uploadStats.textContent = `Error: ${error.message}`;
+                    pauseBtn.classList.add('hidden');
+                    resumeBtn.classList.remove('hidden');
+                };
+                
+                upload.onStats = (stats) => {
+                    const speed = formatFileSize(stats.uploadSpeed) + '/s';
+                    const timeRemaining = formatTime(stats.timeRemaining);
+                    const uploaded = formatFileSize(stats.bytesUploaded);
+                    const total = formatFileSize(stats.totalBytes);
+                    
+                    uploadStats.textContent = `${uploaded} of ${total} (${speed}) - ${timeRemaining} remaining`;
+                };
+                
+                // Button event handlers
+                uploadBtn.addEventListener('click', () => {
+                    upload.start();
+                    uploadBtn.classList.add('hidden');
+                    pauseBtn.classList.remove('hidden');
+                    resumeBtn.classList.add('hidden');
+                });
+                
+                pauseBtn.addEventListener('click', () => {
+                    upload.pause();
+                    pauseBtn.classList.add('hidden');
+                    resumeBtn.classList.remove('hidden');
+                });
+                
+                resumeBtn.addEventListener('click', () => {
+                    upload.resume();
+                    resumeBtn.classList.add('hidden');
+                    pauseBtn.classList.remove('hidden');
+                });
+                
+                cancelBtn.addEventListener('click', () => {
+                    upload.cancel();
+                });
+                
+                // Check for existing upload state
+                if (upload.uploadedChunks.size > 0) {
+                    const percent = (upload.uploadedChunks.size / upload.totalChunks) * 100;
+                    progressBar.style.width = `${percent}%`;
+                    progressBar.textContent = `${percent.toFixed(1)}%`;
+                    
+                    if (upload.completed) {
+                        upload.onComplete();
+                    } else {
+                        uploadStats.textContent = `Resume upload (${upload.uploadedChunks.size} of ${upload.totalChunks} chunks uploaded)`;
+                    }
+                }
+            }
+
+            // Helper function to format file size
+            function formatFileSize(bytes) {
+                if (bytes === 0) return '0 Bytes';
+                
+                const k = 1024;
+                const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            }
+            
+            // Helper function to format time
+            function formatTime(seconds) {
+                if (!seconds || !isFinite(seconds) || seconds <= 0) {
+                    return 'calculating...';
+                }
+                
+                if (seconds < 60) {
+                    return `${Math.ceil(seconds)} seconds`;
+                } else if (seconds < 3600) {
+                    return `${Math.ceil(seconds / 60)} minutes`;
+                } else {
+                    const hours = Math.floor(seconds / 3600);
+                    const minutes = Math.ceil((seconds % 3600) / 60);
+                    return `${hours} hours, ${minutes} minutes`;
+                }
+            }
+        });
+    </script>
+</body>
+</html>
