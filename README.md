@@ -14,15 +14,19 @@ This repository provides a backend API built with **Node.js** and **Express** fo
 - Simple RESTful endpoints for upload and status check
 
 ## 📦 Project Structure
+
+```
 .
+├── public
+│ └── index.html # Main chunked upload router
 ├── routes
 │ └── upload.js # Main chunked upload router
-├── uploads/
+├── uploads
 │ ├── chunks/ # Temporary chunk storage
 │ └── final files # Completed/merged files
 ├── server.js # Express app entry point
 └── README.md # This file
-
+```
 
 ## 🛠️ Setup
 
@@ -49,13 +53,17 @@ node server.js
 Open http://localhost:3000/ in browser.
 
 ## API Endpoints
-1. Upload Chunk
+
+1. Upload Chunk:
+
+```
 POST /upload-chunk?uploadId=<id>&chunkIndex=<index>
+```
 
 Form Data:
 
-file: File chunk (type: file)
+    file: File chunk (type: file)
 
-fileName: Full name of the final file
+    fileName: Full name of the final file
 
-totalChunks: Total number of chunks
+    totalChunks: Total number of chunks
